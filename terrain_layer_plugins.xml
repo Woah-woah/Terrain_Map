@@ -1,0 +1,5 @@
+<library path="terrain_layer">
+  <class name="terrain_layer::TerrainLayer" type="terrain_layer::TerrainLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>地形语义栅格layer</description>
+  </class>
+</library>
