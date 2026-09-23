@@ -13,8 +13,13 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
+find_package(nav2_util REQUIRED)
 find_package(pluginlib REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
@@ -30,8 +35,13 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
+  geometry_msgs
   nav2_costmap_2d
+  nav2_util
   pluginlib
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -56,7 +66,18 @@ install(FILES terrain_layer_plugins.xml
 )
 
 if(BUILD_TESTING)
+  set(AMENT_LINT_AUTO_FILE_EXCLUDE
+    ${CMAKE_CURRENT_SOURCE_DIR}/build
+    ${CMAKE_CURRENT_SOURCE_DIR}/install
+    ${CMAKE_CURRENT_SOURCE_DIR}/log
+  )
+  set(AMENT_LINT_AUTO_EXCLUDE
+    ament_cmake_lint_cmake
+    ament_cmake_uncrustify
+    ament_cmake_xmllint
+  )
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -65,14 +86,44 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ros_log)
+  ament_add_gtest(test_terrain_layer_tf
+    test/test_terrain_layer_tf.cpp
+    ENV
+      ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_log
+  )
+  if(TARGET test_terrain_layer_tf)
+    target_include_directories(test_terrain_layer_tf PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    ament_target_dependencies(test_terrain_layer_tf
+      rclcpp
+      geometry_msgs
+      nav2_costmap_2d
+      nav2_util
+      tf2
+      tf2_geometry_msgs
+      tf2_ros
+    )
+    target_link_libraries(test_terrain_layer_tf
+      ${PROJECT_NAME}
+      yaml-cpp
+    )
+  endif()
 endif()
 
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
   rclcpp
+  geometry_msgs
   nav2_costmap_2d
+  nav2_util
   pluginlib
+  tf2
+  tf2_geometry_msgs
+  tf2_ros
   yaml-cpp
 )
 

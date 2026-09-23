@@ -4,6 +4,9 @@
 #include <nav2_costmap_2d/layer.hpp>
 #include <nav2_costmap_2d/costmap_2d.hpp>
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -38,6 +41,13 @@ private:
   // terrain 栅格在 world frame 下旋转后的包围盒
   void computeTerrainWorldBounds(
     double & min_x, double & min_y, double & max_x, double & max_y) const;
+  std::array<std::array<double, 2>, 4> computeTerrainWorldCorners() const;
+  bool lookupTransform(
+    const std::string & target_frame, const std::string & source_frame,
+    geometry_msgs::msg::TransformStamped & transform, const char * context);
+  void transformPoint(
+    const geometry_msgs::msg::TransformStamped & transform,
+    double source_x, double source_y, double & target_x, double & target_y) const;
 
   // terrain.yaml -> terrain.pgm -> terrain_grid_ 只在初始化时读取一次
   std::string terrain_yaml_;

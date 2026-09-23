@@ -2,7 +2,7 @@
 //
 // 数据流：
 //   terrain.yaml -> terrain.pgm -> terrain_grid_（初始化时读取一次，之后不再做磁盘 IO）
-//   updateCosts: master(i,j) -> mapToWorld -> world -> worldToTerrainCell -> terrain_grid_
+//   updateCosts: master(i,j) -> mapToWorld -> costmap frame -> terrain frame -> worldToTerrainCell -> terrain_grid_
 //
 // 约定：
 //   terrain 语义固定为 0=NONE、1=SLOPE、2=TUNNEL，PGM 像素值原样解释，不按 occupancy 阈值处理。
@@ -20,9 +20,14 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav2_costmap_2d/cost_values.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -201,7 +206,7 @@ int parseIntField(const YAML::Node & parent, const std::string & key, const std:
 namespace terrain_layer
 {
 // ============================================================================
-// 初始化：读取参数 -> 加载 terrain 文件 -> 校验 frame -> 打印统计
+// 初始化：读取参数 -> 加载 terrain 文件 -> 校验基础指针 -> 打印统计
 // ============================================================================
 void TerrainLayer::onInitialize()
 {
@@ -231,16 +236,11 @@ void TerrainLayer::onInitialize()
   // terrain 只在初始化时读取一次，运行期不再做磁盘 IO
   loadTerrainMap(terrain_yaml_);
 
-  // terrain 是固定的全局先验地图，必须与 costmap 处于同一个 frame；本层不做 TF 变换
   if (layered_costmap_ == nullptr) {
     throw std::runtime_error("TerrainLayer '" + name_ + "' 未挂载到 layered costmap");
   }
-  const std::string costmap_frame = layered_costmap_->getGlobalFrameID();
-  if (terrain_frame_id_ != costmap_frame) {
-    throw std::runtime_error(
-            "TerrainLayer '" + name_ + "' 的 terrain frame_id '" + terrain_frame_id_ +
-            "' 与 costmap 的 global frame '" + costmap_frame +
-            "' 不一致；terrain 被定义为固定全局先验地图，本层不做 TF 变换");
+  if (tf_ == nullptr) {
+    throw std::runtime_error("TerrainLayer '" + name_ + "' 无法获取 Nav2 TF buffer");
   }
 
   logTerrainSummary();
@@ -292,6 +292,12 @@ void TerrainLayer::updateBounds(
   if (!enabled_ || terrain_grid_.empty()) {
     return;
   }
+  if (layered_costmap_ == nullptr) {
+    current_ = false;
+    return;
+  }
+
+  const std::string costmap_frame = layered_costmap_->getGlobalFrameID();
 
   // terrain 是静态先验图：需要更新的区域就是它在 world frame 下真实的 AABB，
   // 而不是无穷大范围；LayeredCostmap 会再按当前 costmap 窗口做裁剪。
@@ -299,7 +305,32 @@ void TerrainLayer::updateBounds(
   double terrain_min_y = 0.0;
   double terrain_max_x = 0.0;
   double terrain_max_y = 0.0;
-  computeTerrainWorldBounds(terrain_min_x, terrain_min_y, terrain_max_x, terrain_max_y);
+
+  if (terrain_frame_id_ == costmap_frame) {
+    computeTerrainWorldBounds(terrain_min_x, terrain_min_y, terrain_max_x, terrain_max_y);
+    current_ = true;
+  } else {
+    geometry_msgs::msg::TransformStamped terrain_to_costmap;
+    if (!lookupTransform(costmap_frame, terrain_frame_id_, terrain_to_costmap, "updateBounds")) {
+      current_ = false;
+      return;
+    }
+
+    terrain_min_x = std::numeric_limits<double>::max();
+    terrain_min_y = std::numeric_limits<double>::max();
+    terrain_max_x = std::numeric_limits<double>::lowest();
+    terrain_max_y = std::numeric_limits<double>::lowest();
+    for (const auto & corner : computeTerrainWorldCorners()) {
+      double costmap_x = 0.0;
+      double costmap_y = 0.0;
+      transformPoint(terrain_to_costmap, corner[0], corner[1], costmap_x, costmap_y);
+      terrain_min_x = std::min(terrain_min_x, costmap_x);
+      terrain_min_y = std::min(terrain_min_y, costmap_y);
+      terrain_max_x = std::max(terrain_max_x, costmap_x);
+      terrain_max_y = std::max(terrain_max_y, costmap_y);
+    }
+    current_ = true;
+  }
 
   *min_x = std::min(*min_x, terrain_min_x);
   *min_y = std::min(*min_y, terrain_min_y);
@@ -312,6 +343,10 @@ void TerrainLayer::updateCosts(
   int min_i, int min_j, int max_i, int max_j)
 {
   if (!enabled_ || terrain_grid_.empty()) {
+    return;
+  }
+  if (layered_costmap_ == nullptr) {
+    current_ = false;
     return;
   }
 
@@ -327,6 +362,16 @@ void TerrainLayer::updateCosts(
   const int i_end = std::min(static_cast<int>(master_size_x), max_i);
   const int j_end = std::min(static_cast<int>(master_size_y), max_j);
 
+  const std::string costmap_frame = layered_costmap_->getGlobalFrameID();
+  const bool same_frame = (terrain_frame_id_ == costmap_frame);
+  geometry_msgs::msg::TransformStamped costmap_to_terrain;
+  if (!same_frame &&
+    !lookupTransform(terrain_frame_id_, costmap_frame, costmap_to_terrain, "updateCosts"))
+  {
+    current_ = false;
+    return;
+  }
+
   unsigned char * master_array = master_grid.getCharMap();
   for (int j = j_begin; j < j_end; ++j) {
     for (int i = i_begin; i < i_end; ++i) {
@@ -335,6 +380,14 @@ void TerrainLayer::updateCosts(
       double wx = 0.0;
       double wy = 0.0;
       master_grid.mapToWorld(static_cast<unsigned int>(i), static_cast<unsigned int>(j), wx, wy);
+
+      if (!same_frame) {
+        double terrain_wx = 0.0;
+        double terrain_wy = 0.0;
+        transformPoint(costmap_to_terrain, wx, wy, terrain_wx, terrain_wy);
+        wx = terrain_wx;
+        wy = terrain_wy;
+      }
 
       unsigned int terrain_mx = 0;
       unsigned int terrain_my = 0;
@@ -354,6 +407,7 @@ void TerrainLayer::updateCosts(
       master_array[index] = nav2_costmap_2d::FREE_SPACE;
     }
   }
+  current_ = true;
 }
 
 void TerrainLayer::reset()
@@ -411,27 +465,77 @@ uint8_t TerrainLayer::terrainAt(unsigned int terrain_mx, unsigned int terrain_my
 void TerrainLayer::computeTerrainWorldBounds(
   double & min_x, double & min_y, double & max_x, double & max_y) const
 {
-  const double terrain_size_x = static_cast<double>(terrain_width_) * terrain_resolution_;
-  const double terrain_size_y = static_cast<double>(terrain_height_) * terrain_resolution_;
-  const double corner_x[4] = {0.0, terrain_size_x, terrain_size_x, 0.0};
-  const double corner_y[4] = {0.0, 0.0, terrain_size_y, terrain_size_y};
-
   min_x = std::numeric_limits<double>::max();
   min_y = std::numeric_limits<double>::max();
   max_x = std::numeric_limits<double>::lowest();
   max_y = std::numeric_limits<double>::lowest();
 
+  for (const auto & corner : computeTerrainWorldCorners()) {
+    min_x = std::min(min_x, corner[0]);
+    min_y = std::min(min_y, corner[1]);
+    max_x = std::max(max_x, corner[0]);
+    max_y = std::max(max_y, corner[1]);
+  }
+}
+
+std::array<std::array<double, 2>, 4> TerrainLayer::computeTerrainWorldCorners() const
+{
+  const double terrain_size_x = static_cast<double>(terrain_width_) * terrain_resolution_;
+  const double terrain_size_y = static_cast<double>(terrain_height_) * terrain_resolution_;
+  const double corner_x[4] = {0.0, terrain_size_x, terrain_size_x, 0.0};
+  const double corner_y[4] = {0.0, 0.0, terrain_size_y, terrain_size_y};
+  std::array<std::array<double, 2>, 4> corners{};
+
   // 四个角经 R(yaw) 旋转后再取 AABB，保证考虑 origin yaw
   for (int k = 0; k < 4; ++k) {
-    const double wx =
+    corners[static_cast<std::size_t>(k)][0] =
       terrain_origin_x_ + terrain_cos_yaw_ * corner_x[k] - terrain_sin_yaw_ * corner_y[k];
-    const double wy =
+    corners[static_cast<std::size_t>(k)][1] =
       terrain_origin_y_ + terrain_sin_yaw_ * corner_x[k] + terrain_cos_yaw_ * corner_y[k];
-    min_x = std::min(min_x, wx);
-    min_y = std::min(min_y, wy);
-    max_x = std::max(max_x, wx);
-    max_y = std::max(max_y, wy);
   }
+
+  return corners;
+}
+
+bool TerrainLayer::lookupTransform(
+  const std::string & target_frame, const std::string & source_frame,
+  geometry_msgs::msg::TransformStamped & transform, const char * context)
+{
+  if (tf_ == nullptr) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 5000,
+      "TerrainLayer '%s' %s: TF buffer 为空，跳过本轮 terrain 更新 (source='%s', target='%s')",
+      name_.c_str(), context, source_frame.c_str(), target_frame.c_str());
+    return false;
+  }
+
+  try {
+    transform = tf_->lookupTransform(target_frame, source_frame, tf2::TimePointZero);
+    return true;
+  } catch (const tf2::TransformException & e) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, *clock_, 5000,
+      "TerrainLayer '%s' %s: 获取 TF 失败，跳过本轮 terrain 更新 "
+      "(source='%s', target='%s'): %s",
+      name_.c_str(), context, source_frame.c_str(), target_frame.c_str(), e.what());
+    return false;
+  }
+}
+
+void TerrainLayer::transformPoint(
+  const geometry_msgs::msg::TransformStamped & transform,
+  double source_x, double source_y, double & target_x, double & target_y) const
+{
+  geometry_msgs::msg::PointStamped source_point;
+  source_point.header.frame_id = transform.child_frame_id;
+  source_point.point.x = source_x;
+  source_point.point.y = source_y;
+  source_point.point.z = 0.0;
+
+  geometry_msgs::msg::PointStamped target_point;
+  tf2::doTransform(source_point, target_point, transform);
+  target_x = target_point.point.x;
+  target_y = target_point.point.y;
 }
 
 // ============================================================================
