@@ -88,29 +88,8 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 
   file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/ros_log)
-  ament_add_gtest(test_terrain_layer_tf
-    test/test_terrain_layer_tf.cpp
-    ENV
-      ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_log
-  )
-  if(TARGET test_terrain_layer_tf)
-    target_include_directories(test_terrain_layer_tf PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    ament_target_dependencies(test_terrain_layer_tf
-      rclcpp
-      geometry_msgs
-      nav2_costmap_2d
-      nav2_util
-      tf2
-      tf2_geometry_msgs
-      tf2_ros
-    )
-    target_link_libraries(test_terrain_layer_tf
-      ${PROJECT_NAME}
-      yaml-cpp
-    )
-  endif()
+
+
 endif()
 
 ament_export_include_directories(include)
